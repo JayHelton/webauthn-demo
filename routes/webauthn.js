@@ -1,13 +1,27 @@
 const express   = require('express');
+const { Fido2Lib } = require('fido2-lib');
 const utils     = require('../utils');
 const config    = require('../config.json');
 const base64url = require('base64url');
 const router    = express.Router();
 const database  = require('./db');
 
-router.post('/register', (request, response) => {
-    if(!request.body || !request.body.username || !request.body.name) {
-        response.json({
+var f2l = new Fido2Lib({
+    // timeout: 42,
+    // rpId: "http://localhost:3000/",
+    rpName: "Contoso",
+    rpIcon: "https://cdn.auth0.com/website/assets/pages/press/img/resources/auth0-logo-main-6001cece68.svg",
+    challengeSize: 128,
+    attestation: "none",
+    // cryptoParams: [-7, -257],
+    // authenticatorAttachment: "platform",
+    // authenticatorRequireResidentKey: false,
+    // authenticatorUserVerification: "required"
+});
+
+router.post('/register/start', async (req, res) => {
+    if(!req.body || !req.body.username || !req.body.name) {
+        res.json({
             'status': 'failed',
             'message': 'Request missing name or username field!'
         })
@@ -15,37 +29,80 @@ router.post('/register', (request, response) => {
         return
     }
 
-    let username = request.body.username;
-    let name     = request.body.name;
+    const name = req.body.name;
+    const username = req.body.username;
+    const exists = Object.values(database).find(u => u.name == username && u.registered);
 
-    if(database[username] && database[username].registered) {
-        response.json({
+    if(exists) {
+        return res.json({
             'status': 'failed',
-            'message': `Username ${username} already exists`
-        })
-
-        return
+            'message': `User ${username} already exist!`
+        });
     }
 
-    database[username] = {
+    const uid = utils.randomBase64URLBuffer();
+    const user = database[uid] = {
         'name': name,
         'registered': false,
-        'id': utils.randomBase64URLBuffer(),
+        'id': uid,
         'authenticators': []
     }
 
-    let challengeMakeCred    = utils.generateServerMakeCredRequest(username, name, database[username].id)
-    challengeMakeCred.status = 'ok'
+    const registrationOptions = await f2l.attestationOptions();
+    registrationOptions.challenge = base64url(registrationOptions.challenge);
+    registrationOptions.user.id = user.id;
+    registrationOptions.user.displayName = user.name;
+    registrationOptions.user.name = user.name;
 
-    request.session.challenge = challengeMakeCred.challenge;
-    request.session.username  = username;
+    req.session.challenge = registrationOptions.challenge;
+    req.session.user = uid;
 
-    response.json(challengeMakeCred)
+    res.json(registrationOptions);
+});
+
+
+router.post('/register/finish', async (req, res) => {
+    if(!req.body       || !req.body.id
+    || !req.body.rawId || !req.body.response
+    || !req.body.type  || req.body.type !== 'public-key' ) {
+        return res.json({
+            'status': 'failed',
+            'message': 'Response missing one or more of id/rawId/response/type fields, or type is not public-key!'
+        })
+    }
+
+    const attestationExpectations = {
+        challenge: base64url.toBuffer(req.session.challenge),
+        origin: config.origin,
+        factor: "either"
+    };
+
+    const clientResponse = {
+        ...req.body,
+        rawId: new Uint8Array(base64url.toBuffer(req.body.rawId)).buffer,
+        id: new Uint8Array(base64url.toBuffer(req.body.id)).buffer,
+    };
+
+    try {
+        const regResult = await f2l.attestationResult(clientResponse, attestationExpectations); // will throw on error
+        const publicKey = regResult.authnrData.get('credentialPublicKeyPem')
+        const counter = regResult.authnrData.get('counter');
+        const credId = base64url(regResult.authnrData.get('credId'));
+        const uid = req.session.user;
+        const user = database[uid];
+        user.registered = true;
+        user.authenticators.push({ publicKey, counter, credId });
+        req.session.loggedIn = true;
+        res.json({ 'status': 'ok' })
+    } catch (err) {
+        console.log(err);
+        res.status(500);
+    }
 })
 
-router.post('/login', (request, response) => {
-    if(!request.body || !request.body.username) {
-        response.json({
+router.post('/login/start', async (req, res) => {
+    if(!req.body || !req.body.username) {
+        res.json({
             'status': 'failed',
             'message': 'Request missing username field!'
         })
@@ -53,85 +110,78 @@ router.post('/login', (request, response) => {
         return
     }
 
-    let username = request.body.username;
+    const username = req.body.username;
+    const user = Object.values(database).find(u => u.name == username && u.registered);
 
-    if(!database[username] || !database[username].registered) {
-        response.json({
+    if(!user) {
+        return res.json({
             'status': 'failed',
             'message': `User ${username} does not exist!`
-        })
-
-        return
+        });
     }
 
-    let getAssertion    = utils.generateServerGetAssertion(database[username].authenticators)
-    getAssertion.status = 'ok'
+    const registrationOptions = await f2l.assertionOptions();
+    const challenge = base64url(registrationOptions.challenge);
 
-    request.session.challenge = getAssertion.challenge;
-    request.session.username  = username;
+    req.session.challenge = registrationOptions.challenge;
+    req.session.user = user.id;
+    const response = {
+        challenge,
+        // allowCredentials: user.authenticators.map(a => {
+        //     return {
+        //         id: a.credId,
+        //         type: "public-key",
+        //     };
+        // })
+    }
+    res.json(response);
+});
 
-    response.json(getAssertion)
-})
-
-router.post('/response', (request, response) => {
-    if(!request.body       || !request.body.id
-    || !request.body.rawId || !request.body.response
-    || !request.body.type  || request.body.type !== 'public-key' ) {
-        response.json({
+router.post('/login/finish', async (req, res) => {
+    if(!req.body       || !req.body.id
+    || !req.body.rawId || !req.body.response
+    || !req.body.type  || req.body.type !== 'public-key' ) {
+        return res.json({
             'status': 'failed',
             'message': 'Response missing one or more of id/rawId/response/type fields, or type is not public-key!'
         })
-
-        return
     }
 
-    let webauthnResp = request.body
-    let clientData   = JSON.parse(base64url.decode(webauthnResp.response.clientDataJSON));
+    const clientResponse = {
+        ...req.body,
+        rawId: new Uint8Array(base64url.toBuffer(req.body.rawId)).buffer,
+        id: new Uint8Array(base64url.toBuffer(req.body.id)).buffer,
+    };
 
-    /* Check challenge... */
-    if(clientData.challenge !== request.session.challenge) {
-        response.json({
-            'status': 'failed',
-            'message': 'Challenges don\'t match!'
-        })
+
+    try {
+        const uid = req.session.user;
+        const user = database[uid];
+
+        const isOk = await Promise.all(user.authenticators.map(async a => {
+            const attestationExpectations = {
+                challenge: base64url.toBuffer(req.session.challenge),
+                origin: config.origin,
+                factor: "either",
+                publicKey: a.publicKey,
+                prevCounter: a.prevCounter
+            };
+            try {
+                const regResult = await f2l.attestationResult(clientResponse, attestationExpectations); // will throw on error
+                return true;
+            } catch (err) {
+                return false;
+            }
+        }));
+
+        if (!isOk) { return res.status(401); }
+
+        req.session.loggedIn = true;
+        res.json({ 'status': 'ok' })
+    } catch (err) {
+        console.log(err);
+        res.status(500);
     }
-
-    /* ...and origin */
-    if(clientData.origin !== config.origin) {
-        response.json({
-            'status': 'failed',
-            'message': 'Origins don\'t match!'
-        })
-    }
-
-    let result;
-    if(webauthnResp.response.attestationObject !== undefined) {
-        /* This is create cred */
-        result = utils.verifyAuthenticatorAttestationResponse(webauthnResp);
-
-        if(result.verified) {
-            database[request.session.username].authenticators.push(result.authrInfo);
-            database[request.session.username].registered = true
-        }
-    } else if(webauthnResp.response.authenticatorData !== undefined) {
-        /* This is get assertion */
-        result = utils.verifyAuthenticatorAssertionResponse(webauthnResp, database[request.session.username].authenticators);
-    } else {
-        response.json({
-            'status': 'failed',
-            'message': 'Can not determine type of response!'
-        })
-    }
-
-    if(result.verified) {
-        request.session.loggedIn = true;
-        response.json({ 'status': 'ok' })
-    } else {
-        response.json({
-            'status': 'failed',
-            'message': 'Can not authenticate signature!'
-        })
-    }
-})
+});
 
 module.exports = router;

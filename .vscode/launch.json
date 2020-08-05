@@ -1,0 +1,27 @@
+{
+ "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Node",
+      "program": "${workspaceFolder}/app.js",
+      "request": "launch",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "type": "node"
+    },
+    {
+      "name": "Browser",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:3000",
+      "webRoot": "${workspaceFolder}/static"
+    }
+  ],
+  "compounds": [
+      {
+          "name": "Server/Client",
+          "configurations": ["Node", "Browser"]
+      }
+  ]
+}
