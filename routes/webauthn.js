@@ -127,12 +127,12 @@ router.post('/login/start', async (req, res) => {
     req.session.user = user.id;
     const response = {
         challenge,
-        // allowCredentials: user.authenticators.map(a => {
-        //     return {
-        //         id: a.credId,
-        //         type: "public-key",
-        //     };
-        // })
+        allowCredentials: user.authenticators.map(a => {
+            return {
+                id: a.credId,
+                type: "public-key",
+            };
+        })
     }
     res.json(response);
 });
