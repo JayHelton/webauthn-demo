@@ -132,5 +132,7 @@ $('#login').submit(function(event) {
                 alert(`Server responed with error. The message is: ${response.message}`);
             }
         })
-        .catch((error) => alert(error))
+        .catch((error) => {
+            alert(error);
+        })
 })

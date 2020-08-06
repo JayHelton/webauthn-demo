@@ -68,7 +68,7 @@ router.post('/register/finish', async (req, res) => {
         return res.json({
             'status': 'failed',
             'message': 'Response missing one or more of id/rawId/response/type fields, or type is not public-key!'
-        })
+        });
     }
 
     const attestationExpectations = {
@@ -87,11 +87,11 @@ router.post('/register/finish', async (req, res) => {
         const regResult = await f2l.attestationResult(clientResponse, attestationExpectations); // will throw on error
         const publicKey = regResult.authnrData.get('credentialPublicKeyPem')
         const counter = regResult.authnrData.get('counter');
-        const credId = base64url(regResult.authnrData.get('credId'));
+        const id =  req.body.id; //base64url(regResult.authnrData.get('credId'));
         const uid = req.session.user;
         const user = database[uid];
         user.registered = true;
-        user.authenticators.push({ publicKey, counter, credId });
+        user.authenticators.push({ publicKey, counter, id });
         req.session.loggedIn = true;
         res.json({ 'status': 'ok' })
     } catch (err) {
@@ -120,16 +120,17 @@ router.post('/login/start', async (req, res) => {
         });
     }
 
-    const registrationOptions = await f2l.assertionOptions();
-    const challenge = base64url(registrationOptions.challenge);
+    const authnOptions = await f2l.assertionOptions();
+    const challenge = base64url(authnOptions.challenge);
 
-    req.session.challenge = registrationOptions.challenge;
+    req.session.challenge = challenge;
     req.session.user = user.id;
     const response = {
         challenge,
+        timeout: authnOptions.timeout,
         allowCredentials: user.authenticators.map(a => {
             return {
-                id: a.credId,
+                id: a.id,
                 type: "public-key",
             };
         })
@@ -157,30 +158,29 @@ router.post('/login/finish', async (req, res) => {
     try {
         const uid = req.session.user;
         const user = database[uid];
+        const authenticator = user.authenticators.find(a => a.id = req.body.id);
 
-        const isOk = await Promise.all(user.authenticators.map(async a => {
-            const attestationExpectations = {
-                challenge: base64url.toBuffer(req.session.challenge),
-                origin: config.origin,
-                factor: "either",
-                publicKey: a.publicKey,
-                prevCounter: a.prevCounter
-            };
-            try {
-                const regResult = await f2l.attestationResult(clientResponse, attestationExpectations); // will throw on error
-                return true;
-            } catch (err) {
-                return false;
-            }
-        }));
+        if (!authenticator) {
+            return res.sendStatus(401);
+        }
 
-        if (!isOk) { return res.status(401); }
+        const attestationExpectations = {
+            challenge: base64url.toBuffer(req.session.challenge),
+            origin: config.origin,
+            factor: "either",
+            publicKey: authenticator.publicKey,
+            prevCounter: authenticator.counter
+        };
+
+        const regResult = await f2l.attestationResult(clientResponse, attestationExpectations); // will throw on error
+
+        console.dir(regResult);
 
         req.session.loggedIn = true;
         res.json({ 'status': 'ok' })
     } catch (err) {
         console.log(err);
-        res.status(500);
+        return res.status(401);
     }
 });
 
