@@ -5,6 +5,12 @@ const config    = require('../config.json');
 const base64url = require('base64url');
 const router    = express.Router();
 const database  = require('./db');
+const base64ToArrayBuffer = input => new Uint8Array(base64url.toBuffer(input)).buffer;
+
+const {
+    CredentialAttestation,
+    CredentialAssertion,
+} = require("webauthn-simple-app");
 
 var f2l = new Fido2Lib({
     // timeout: 42,
@@ -77,14 +83,11 @@ router.post('/register/finish', async (req, res) => {
         factor: "either"
     };
 
-    const clientResponse = {
-        ...req.body,
-        rawId: new Uint8Array(base64url.toBuffer(req.body.rawId)).buffer,
-        id: new Uint8Array(base64url.toBuffer(req.body.id)).buffer,
-    };
+    const attResult = CredentialAttestation.from(req.body);
+    attResult.decodeBinaryProperties();
 
     try {
-        const regResult = await f2l.attestationResult(clientResponse, attestationExpectations); // will throw on error
+        const regResult = await f2l.attestationResult(attResult, attestationExpectations); // will throw on error
         const publicKey = regResult.authnrData.get('credentialPublicKeyPem')
         const counter = regResult.authnrData.get('counter');
         const id =  req.body.id; //base64url(regResult.authnrData.get('credId'));
@@ -138,6 +141,8 @@ router.post('/login/start', async (req, res) => {
     res.json(response);
 });
 
+
+
 router.post('/login/finish', async (req, res) => {
     if(!req.body       || !req.body.id
     || !req.body.rawId || !req.body.response
@@ -148,12 +153,9 @@ router.post('/login/finish', async (req, res) => {
         })
     }
 
-    const clientResponse = {
-        ...req.body,
-        rawId: new Uint8Array(base64url.toBuffer(req.body.rawId)).buffer,
-        id: new Uint8Array(base64url.toBuffer(req.body.id)).buffer,
-    };
-
+    var assn = CredentialAssertion.from(req.body);
+    assn.validate();
+    assn.decodeBinaryProperties();
 
     try {
         const uid = req.session.user;
@@ -169,12 +171,12 @@ router.post('/login/finish', async (req, res) => {
             origin: config.origin,
             factor: "either",
             publicKey: authenticator.publicKey,
-            prevCounter: authenticator.counter
+            prevCounter: authenticator.counter,
+            userHandle: uid,
         };
 
-        const regResult = await f2l.attestationResult(clientResponse, attestationExpectations); // will throw on error
-
-        console.dir(regResult);
+        const result = await f2l.assertionResult(assn, attestationExpectations); // will throw on error
+        authenticator.counter = result.authnrData.get("counter");
 
         req.session.loggedIn = true;
         res.json({ 'status': 'ok' })
